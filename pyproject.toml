@@ -1,0 +1,11 @@
+[project]
+name = "loop-lab-onboarding"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "google-adk[db]==2.3.0",
+    "greenlet>=3.5.3",
+]
