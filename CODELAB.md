@@ -52,11 +52,15 @@ comfortable in a terminal and know a little Python. No cloud account required fo
 Each step lives in its own folder (`01_baseline` → `06_cloud`) and adds **exactly one idea**, so
 you can always `diff` two neighbours to see precisely what changed.
 
+> 📦 **All the code is on GitHub:** [github.com/cuppibla/loop-lab-onboarding](https://github.com/cuppibla/loop-lab-onboarding) — you'll clone it in Setup, and every step links to its folder.
+
 ## The big idea: how a long-running agent really works
 Duration: 5:00
 
 Before we touch code, let's fix the mental model — because almost everyone gets it wrong at
 first, and once you get it right, the rest of the lab is easy.
+
+![How a long-running agent works: a durable session that short-lived runs read and write, with a driver that re-drives runs on each event](codelab-assets/architecture.png)
 
 ### The wrong picture
 
@@ -146,6 +150,8 @@ That's it — no cloud project needed until the very last step.
 ## Step 1 · Run the baseline (and watch it vanish)
 Duration: 5:00
 
+📂 **Code for this step:** [`01_baseline/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/01_baseline)
+
 Let's meet the agent. It's an ordinary ADK agent with five tools that run in order.
 
 👉💻 **Run the baseline onboarding:**
@@ -198,6 +204,8 @@ A real onboarding spans days and *will* be interrupted. So the very first thing 
 
 ## Step 2 · Make it survive (persistence)
 Duration: 8:00
+
+📂 **Code for this step:** [`02_persistence/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/02_persistence)
 
 The fix for "it's all in RAM" is to move the state out of RAM and into a **database**. In ADK,
 that's the job of a **`SessionService`**.
@@ -257,6 +265,8 @@ interrupted run.** The state is a photograph, not a pause button.
 
 ## Step 3 · Pause for a human (the first "kill the server")
 Duration: 10:00
+
+📂 **Code for this step:** [`03_human_approval/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/03_human_approval)
 
 Some actions you never let an agent do alone. Granting **production access** is one of them —
 a human manager has to approve it. And that approval might take **days**.
@@ -347,6 +357,8 @@ runner.run_async(session_id="s-Alice", new_message=resume)   # a fresh run
 ## Step 4 · Survive a crash
 Duration: 10:00
 
+📂 **Code for this step:** [`04_crash_recovery/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/04_crash_recovery)
+
 Step 3 handled a **clean** pause — the run ended tidily and we chose when to resume. But a real
 crash isn't clean. The process dies **mid-run**, in the middle of executing, with no chance to
 tidy up. Can we recover from *that*?
@@ -405,6 +417,8 @@ the whole next step. `cd ..`
 
 ## Step 5 · Don't order two laptops (idempotency)
 Duration: 12:00
+
+📂 **Code for this step:** [`05_idempotency/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/05_idempotency)
 
 This is the most important step in the lab. It's the difference between an agent that *looks*
 crash-safe and one that actually is.
@@ -483,6 +497,8 @@ you resumability; **you** made resumability *safe*. `cd ..`
 ## Step 6 · Take it to Google Cloud
 Duration: 8:00
 
+📂 **Code for this step:** [`06_cloud/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/06_cloud)
+
 Here's the payoff of the whole design: **nothing about your agent changes to go to
 production.** Only the *connection* changes.
 
@@ -498,7 +514,7 @@ local file:
 # cloud:              postgresql+asyncpg://…   (via the Cloud SQL Python Connector)
 ```
 
-See [`06_cloud/cloudsql_engine.py`](06_cloud/cloudsql_engine.py) for the wiring.
+See [`06_cloud/cloudsql_engine.py`](https://github.com/cuppibla/loop-lab-onboarding/blob/main/06_cloud/cloudsql_engine.py) for the wiring.
 
 > ⚠️ **Remember the async rule from Step 2:** Cloud SQL must use the **async** `asyncpg` driver,
 > not the sync `pg8000`. This trips people up.

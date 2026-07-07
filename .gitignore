@@ -3,3 +3,4 @@ __pycache__/
 *.db
 fake_systems.json
 .env
+lab1-long-running-agent/
