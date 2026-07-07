@@ -13,9 +13,17 @@ ladder you run in your terminal, one idea per level.
 grant_access → send_welcome`. External systems are local stubs ([any level's
 `fake_systems.py`](l0_baseline/fake_systems.py)); progress is an explicit `state["stage"]`.
 
+> **📖 Following the guided codelab?** See **[CODELAB.md](CODELAB.md)** — the step-by-step,
+> clone-and-run walkthrough (claat-ready for codelabs.developers.google.com).
+
 ## Setup
 ```bash
-uv sync                    # installs google-adk[db], aiosqlite, greenlet (pinned)
+# pip flavor (mirrors the other ADK tutorials):
+./setup_venv.sh            # Windows: setup_venv.bat
+source .venv/bin/activate
+# — or — uv flavor:
+uv sync                    # then use `uv run python …`
+
 cp .env.example .env       # then put your GOOGLE_API_KEY in .env   (Gemini)
 ```
 

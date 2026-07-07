@@ -1,0 +1,4 @@
+google-adk[db]==2.3.0
+aiosqlite>=0.22.1
+greenlet>=3.5.3
+python-dotenv>=1.0
