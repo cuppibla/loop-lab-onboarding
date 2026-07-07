@@ -2,8 +2,19 @@
 # One-time setup (pip flavor — mirrors the other ADK tutorials).
 # uv users can just run `uv sync` instead.
 set -e
-echo "Creating virtual environment (.venv)…"
-python3 -m venv .venv
+
+# ADK needs Python 3.10+ — pick a good interpreter (avoid an old system python).
+PY=""
+for c in python3.13 python3.12 python3.11 python3.10; do
+  command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+done
+if [ -z "$PY" ]; then
+  echo "ERROR: need Python 3.10+ (ADK requirement). Install one, e.g. 'brew install python@3.12'." >&2
+  exit 1
+fi
+
+echo "Using $($PY --version). Creating .venv…"
+"$PY" -m venv .venv
 source .venv/bin/activate
 pip install --quiet --upgrade pip
 echo "Installing dependencies…"

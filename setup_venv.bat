@@ -1,7 +1,8 @@
 @echo off
-REM One-time setup for Windows (pip flavor).
-echo Creating virtual environment (.venv)...
-python -m venv .venv
+REM One-time setup for Windows (pip flavor). Needs Python 3.10+ (ADK requirement).
+where py >nul 2>nul && (set PY=py -3) || (set PY=python)
+echo Creating .venv...
+%PY% -m venv .venv
 call .venv\Scripts\activate
 pip install --quiet --upgrade pip
 echo Installing dependencies...
