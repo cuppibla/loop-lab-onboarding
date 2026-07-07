@@ -12,4 +12,4 @@ echo.
 echo Done. Next:
 echo   1) put your GOOGLE_API_KEY in .env
 echo   2) .venv\Scripts\activate
-echo   3) cd l0_baseline ^&^& python driver.py Alice
+echo   3) cd 01_baseline ^&^& python driver.py Alice

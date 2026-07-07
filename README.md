@@ -11,7 +11,7 @@ ladder you run in your terminal, one idea per level.
 
 **Scenario:** onboarding a new hire — `create_account → order_laptop → [manager approval] →
 grant_access → send_welcome`. External systems are local stubs ([any level's
-`fake_systems.py`](l0_baseline/fake_systems.py)); progress is an explicit `state["stage"]`.
+`fake_systems.py`](01_baseline/fake_systems.py)); progress is an explicit `state["stage"]`.
 
 > **📖 Following the guided codelab?** See **[CODELAB.md](CODELAB.md)** — the step-by-step,
 > clone-and-run walkthrough (claat-ready for codelabs.developers.google.com).
@@ -32,15 +32,15 @@ Each level adds exactly one idea. `diff` two neighbours to see the lesson.
 
 | Level | Adds | Key ADK piece | Try it |
 |---|---|---|---|
-| **[l0_baseline](l0_baseline)** | 5 steps, no durability | `Agent` + `FunctionTool`s | `python driver.py Alice` |
-| **[l1_persist](l1_persist)** | progress saved to a DB | `DatabaseSessionService` (SQLite) | `start` / `status` |
-| **[l2_hitl](l2_hitl)** | pause for a human | `LongRunningFunctionTool` | `start` → `approve` |
-| **[l3_resume](l3_resume)** | survive a crash | `ResumabilityConfig` | `start` → Ctrl-C → `resume` |
-| **[l4_idempotent](l4_idempotent)** | don't order two laptops | your own guard | crash → `resume` → bug → fix |
-| **[l5_cloud](l5_cloud)** | same code, managed | Cloud SQL / Agent Runtime | `DB_URL` swap / `adk deploy` |
+| **[01_baseline](01_baseline)** | 5 steps, no durability | `Agent` + `FunctionTool`s | `python driver.py Alice` |
+| **[02_persistence](02_persistence)** | progress saved to a DB | `DatabaseSessionService` (SQLite) | `start` / `status` |
+| **[03_human_approval](03_human_approval)** | pause for a human | `LongRunningFunctionTool` | `start` → `approve` |
+| **[04_crash_recovery](04_crash_recovery)** | survive a crash | `ResumabilityConfig` | `start` → Ctrl-C → `resume` |
+| **[05_idempotency](05_idempotency)** | don't order two laptops | your own guard | crash → `resume` → bug → fix |
+| **[06_cloud](06_cloud)** | same code, managed | Cloud SQL / Agent Runtime | `DB_URL` swap / `adk deploy` |
 
 ```bash
-cd l2_hitl
+cd 03_human_approval
 uv run python driver.py reset
 uv run python driver.py start Alice     # pauses at approval; the process exits
 uv run python driver.py approve Alice   # a fresh process resumes and finishes

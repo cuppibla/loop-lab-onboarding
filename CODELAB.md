@@ -25,7 +25,7 @@ In this codelab you'll build an **onboarding agent** step by step and turn it in
 session** that short-lived runs read and write, plus a **driver** that re-drives a run
 whenever there's something to do. You engineer the driver; ADK gives you the durable pieces.
 
-Each step lives in its own folder (`l0_baseline` → `l5_cloud`) and adds exactly one idea.
+Each step lives in its own folder (`01_baseline` → `06_cloud`) and adds exactly one idea.
 
 ## Setup
 
@@ -52,11 +52,11 @@ GOOGLE_GENAI_USE_VERTEXAI=False
 
 You're ready.
 
-## L0 · Run the baseline (and lose it)
+## 1 · Run the baseline (and lose it)
 
 💻
 ```bash
-cd l0_baseline
+cd 01_baseline
 python driver.py Alice
 ```
 
@@ -76,13 +76,13 @@ The agent runs all five onboarding steps in one process, in memory.
 **everything is gone.** A real onboarding takes days and *will* be interrupted. We need
 durability. `cd ..`
 
-## L1 · Make it survive (persistence)
+## 2 · Make it survive (persistence)
 
 L1 swaps the in-memory session for a database and writes an explicit `state["stage"]`.
 
 💻
 ```bash
-cd l1_persist
+cd 02_persistence
 python driver.py reset
 python driver.py start Alice
 python driver.py status Alice      # a FRESH process reads the stage from disk
@@ -99,7 +99,7 @@ Progress now lives on disk.
 👉 But there's still no way to *continue* an interrupted run — you can read the saved stage,
 not resume it. **Persisted ≠ resumable.** `cd ..`
 
-## L2 · Pause for a human (the first "kill the server")
+## 3 · Pause for a human (the first "kill the server")
 
 Some actions you never let an agent do alone. In L2, `request_access` becomes a
 **`LongRunningFunctionTool`**: it returns a *pending* status and the run **ends**, handing
@@ -107,7 +107,7 @@ control back. A manager approves later and the run resumes.
 
 💻 Start it — it pauses at the approval step:
 ```bash
-cd l2_hitl
+cd 03_human_approval
 python driver.py reset
 python driver.py start Alice
 ```
@@ -134,7 +134,7 @@ python driver.py approve Alice
 separate process resumes it. Notice we didn't even need crash-recovery machinery for this —
 it's the long-running-tool mechanism (resume = send a `function_response`). `cd ..`
 
-## L3 · Survive a crash
+## 4 · Survive a crash
 
 L2 handled a *clean* pause. What about a real crash mid-run? L3 adds
 **`ResumabilityConfig(is_resumable=True)`** to the `App` and a `resume` command. Now an
@@ -143,7 +143,7 @@ unfinished one.
 
 💻
 ```bash
-cd l3_resume
+cd 04_crash_recovery
 python driver.py reset
 python driver.py start Alice
 ```
@@ -156,14 +156,14 @@ It picks up from where it died and continues.
 👉 But here's the question that makes or breaks a long-running agent: *what if the crash
 lands **inside** a step that already did something — like ordering a laptop?* `cd ..`
 
-## L4 · Don't order two laptops (idempotency)
+## 5 · Don't order two laptops (idempotency)
 
 This is the most important step. Crash-resume **re-runs** the unfinished step. If that step
 already ordered a laptop, you order **two**.
 
 💻 See the bug (guard off, crash right after ordering):
 ```bash
-cd l4_idempotent
+cd 05_idempotency
 python driver.py reset
 IDEMPOTENT=0 CRASH_AFTER_ORDER=1 python driver.py start Bob    # crashes after ordering
 IDEMPOTENT=0 python driver.py resume Bob
@@ -195,21 +195,21 @@ also rides the event log and might not be flushed in the crash window.
 **The lesson:** recovery re-runs steps, so every side effect must be idempotent. *A loop that
 recovers but doesn't guard its side effects is just a bug that runs twice.* `cd ..`
 
-## L5 · Take it to Google Cloud
+## 6 · Take it to Google Cloud
 
 Nothing about the agent changes — only the *connection*. "Durability is a connection string,
 not a rewrite."
 
 - **Cloud SQL for PostgreSQL:** set `DB_URL="postgresql+asyncpg://"` and wire the Cloud SQL
   Python Connector (async `asyncpg`, **not** the sync `pg8000`) — see
-  `l5_cloud/cloudsql_engine.py`.
+  `06_cloud/cloudsql_engine.py`.
 - **Agent Runtime:** `adk deploy` gives you **managed sessions** (no database to run) and
   **Cloud Trace** across every real user. The paused-approval invocation lives in the managed
   runtime.
 
 💻 It still runs locally on SQLite, so you can try it without a GCP project:
 ```bash
-cd l5_cloud
+cd 06_cloud
 python driver.py reset && python driver.py start Alice && python driver.py approve Alice
 ```
 
