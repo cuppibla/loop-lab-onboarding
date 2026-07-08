@@ -115,6 +115,44 @@ _loop engineering_: **the loop is the driver.**
 
 Keep this table in mind. Each step from here just fills in one row.
 
+### Walking through Alice's onboarding, piece by piece
+
+Let's ground this in the actual story from the top of the page, so the four pieces stop being
+abstract:
+
+| Moment in Alice's onboarding | Piece involved | What's actually happening |
+|---|---|---|
+| Monday 9am: agent creates her account, orders her laptop | Durable session | Each result is written to the DB as it happens — not held in RAM "for later" |
+| Manager is in meetings until Wednesday | Pause / resume | The run **ends** the moment `request_access` returns "pending." No process is sitting there waiting for two days |
+| Wednesday: manager clicks approve | Pause / resume | A brand-new process starts a brand-new run, on the same session, and continues from `AWAITING_APPROVAL` |
+| Server gets redeployed mid-run | Resumable runs | The next run replays everything already logged, then re-runs only the one step that never finished |
+| The re-run step happens to be "order the laptop" again | Driver + idempotency | This is the trap. Without a guard, Alice gets two laptops. This is **piece 4**, and it's the one nothing hands you for free |
+
+> aside positive
+> **The single biggest reframe in this lab:** at **no point** is there a process alive for two
+> days. The "long" in "long-running agent" describes the **task** (it takes days), not the
+> **process** (which lives for milliseconds to seconds per run). Every step below is just a
+> mechanism for making a days-long *task* out of a series of tiny, disposable *runs*.
+
+### Common misconception: "isn't this just `async`/`await`?"
+
+If you've written async code before, the pause/resume behavior might look like `await`ing a
+slow call. It's a tempting but wrong mental model — and worth killing now, because it'll bite
+you every step from here on.
+
+| | `await some_slow_call()` | This lab's pause/resume |
+|---|---|---|
+| Where does execution live while waiting? | On the stack, inside the running process | Nowhere — the process has exited |
+| What survives if the machine reboots? | Nothing. The `await` is gone | Everything. It's a row in a database |
+| What resumes it? | The same coroutine, when the awaited call returns | Any process, possibly on a different machine, sending a message |
+| How long can it wait? | Seconds, maybe minutes — bounded by the process's lifetime | Minutes, days, weeks — bounded by nothing |
+
+> aside positive
+> **The one-line difference:** `await` suspends a *stack frame in memory*; what we're building
+> suspends an *entry in a database*. That's why a manager can approve Alice's access two days
+> later, from any machine, long after the original Python process — and even the original
+> *server* — no longer exists.
+
 ## Setup
 Duration: 5:00
 
@@ -133,12 +171,36 @@ source .venv/bin/activate
 > 🧰 **Prefer uv?** Run `uv sync` instead, and use `uv run python …` wherever the codelab says
 > `python …`. Everything else is identical.
 
-👉 **Add your Gemini API key.** Open `.env` and paste a key from
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey):
+### Get your Gemini API key
+
+The agent calls Gemini, so it needs a key. This is free from Google AI Studio and takes about a
+minute — **no billing and no cloud project required** for the core lab.
+
+👉 **Get the key:**
+
+1. Go to **[aistudio.google.com/apikey](https://aistudio.google.com/apikey)** and sign in with
+   your Google account.
+2. Click **Create API key** (top-right).
+3. In the dialog, either pick an existing Google project or let it create a new one for you.
+4. Copy the key it shows you. It **starts with `AIza…` and is about 40 characters** long.
+
+> aside negative
+> **Treat the API key like a password.** Don't paste it into public chats, screenshots, or issues,
+> and never commit it to a public GitHub repo. The `.env` file below is already in `.gitignore`
+> so your key stays local — keep it that way.
+
+👉 **Add the key to your `.env`.** Open the `.env` file at the repo root and set these two lines
+(replace `AIza…your-key…` with the key you just copied):
 ```
-GOOGLE_API_KEY=your-key-here
+GOOGLE_API_KEY=AIza…your-key…
 GOOGLE_GENAI_USE_VERTEXAI=False
 ```
+
+> aside positive
+> **What these two lines mean:**
+> - `GOOGLE_API_KEY` — your AI Studio key; how the agent authenticates to Gemini.
+> - `GOOGLE_GENAI_USE_VERTEXAI=False` — tells ADK to use the **AI Studio** key directly, *not*
+>   Vertex AI. (We flip this to Vertex only in the very last Cloud step, and only if you choose to.)
 
 That's it — no cloud project needed until the very last step.
 
@@ -292,6 +354,30 @@ long-running tool and it returns **`pending`**, **the run ends.** The process is
 no thread blocked somewhere "waiting." All that's left is a **paused invocation sitting in the
 durable session** — a note that says "we're waiting on `request_access`."
 
+### Wait — doesn't the run just... hang there?
+
+No, and this is the part people trip on. Nothing is "waiting" anywhere. Walk through exactly
+what happens, in order:
+
+1. The agent calls `request_access(...)`.
+2. The tool function returns immediately — `{"status": "pending", ...}`. It does **not** block.
+3. ADK sees this came from a `LongRunningFunctionTool` and writes one more fact to the durable
+   session: *"there is an unanswered function call, id `xyz`, waiting for a
+   `function_response`."*
+4. The run **ends** — normally, not with an error. `driver.py` gets control back and the Python
+   process exits.
+
+At this instant, there is genuinely **nothing running**. Not a thread, not a coroutine, not a
+process. If you `ps aux` right now you'll find nothing related to Alice's onboarding. The *only*
+thing that exists is a row in `onboarding.db` saying "call `xyz` is still open." Everything
+about "the agent is waiting for the manager" lives entirely in that row — the agent program
+itself has no idea two days are passing.
+
+> aside positive
+> **The mental shift:** a long-running tool doesn't make the *tool* run for a long time. It
+> makes the *tool call* stay open — as a fact in a database — for as long as it takes someone to
+> answer it. The "long-running" part is a gap in the data, not a thread in memory.
+
 ### See it pause
 
 👉💻
@@ -385,6 +471,32 @@ re-drive        →  replay ✅            replay ✅           RE-RUN this one 
 > ℹ️ **Two different "resumes."** Step 3's approval-resume sends a `function_response` (a clean
 > continuation). This crash-resume is different: you re-drive the **unfinished invocation** by
 > its id, with no new message. Same durable session, two entry points.
+
+### What "replay" actually does (and doesn't do)
+
+This is the step where people quietly assume something false: that "replay" means "run the
+agent again from the top." It doesn't. Here's the distinction that matters:
+
+- **Replaying an event** = ADK reads the logged tool *call* and tool *result* back into context,
+  exactly as they happened, and does **not** call the tool function again. `create_account`'s
+  code never executes a second time — ADK just re-tells the model "you already called this, and
+  here's what it returned."
+- **Re-running a step** = the one step whose result was never logged gets executed for real,
+  because as far as the durable session can tell, it never happened.
+
+> aside positive
+> **Analogy: a bank statement, not a bank teller.** Replay is like handing the agent its own
+> bank statement for the days it was down — "on Tuesday you did X, on Wednesday you did Y" — so
+> it can pick up Thursday with full context, without re-doing Tuesday and Wednesday. If the
+> statement is missing an entry because the branch closed mid-transaction, that's the one
+> transaction that has to happen again. That gap is exactly what Step 5 is about.
+
+> aside negative
+> **The dangerous case, in one sentence:** if the crash lands **inside** a step — after the
+> real-world side effect fired but before the log entry was written — replay can't tell the
+> difference between "never started" and "finished but unlogged," so it re-runs the step. That's
+> why the demo crashes **between** steps to show "no repeated work" — and why Step 5 deliberately
+> crashes *inside* one to expose the two-laptops bug. Keep this in your back pocket.
 
 ### Try it
 
