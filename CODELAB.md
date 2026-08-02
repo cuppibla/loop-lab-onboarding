@@ -1,5 +1,5 @@
 author: Annie Wang (cuppibla)
-summary: Build a long-running AI agent with Google's ADK — one that survives crashes, pauses for a human, and never double-acts. You'll go from a toy that loses everything when it crashes to a durable, resumable, human-in-the-loop agent, one idea at a time.
+summary: Build a long-running AI agent with Google's ADK — one that survives crashes, pauses for a human, never double-acts, and recovers with nobody at the keyboard. You'll go from a toy that loses everything when it crashes to a durable, resumable, human-in-the-loop agent, one idea at a time.
 id: lab1-long-running-agent
 categories: ai,adk,agents,gemini
 environments: Web
@@ -32,7 +32,9 @@ step, turn it into a proper **long-running agent**. By the end it will:
 
 - ✅ **survive a crash** and resume from the exact step it died on,
 - ✅ **pause for a manager's approval** — for minutes or days — and continue when it arrives,
-- ✅ and **never order Alice two laptops**, even when a crash makes it re-run a step.
+- ✅ **never order Alice two laptops**, even when a crash makes it re-run a step,
+- ✅ and **recover with nobody at the keyboard** — a sweeper that finds crashed runs and
+  re-drives them safely.
 
 ### What you'll learn
 
@@ -43,13 +45,15 @@ step, turn it into a proper **long-running agent**. By the end it will:
 - **Idempotency** — the one discipline that separates a real long-running agent from a bug that
   runs twice.
 - How to take the exact same code to **Google Cloud** (Cloud SQL + Agent Runtime).
+- **Who presses "Continue"** — the driver contract, and the sweeper that notices a crash when
+  no human is watching.
 
 ### Who this is for
 
 Anyone who's built a basic ADK (or any) agent and now wants to run one for real. You should be
 comfortable in a terminal and know a little Python. No cloud account required for the core lab.
 
-Each step lives in its own folder (`01_baseline` → `06_cloud`) and adds **exactly one idea**, so
+Each step lives in its own folder (`01_baseline` → `07_driver`) and adds **exactly one idea**, so
 you can always `diff` two neighbours to see precisely what changed.
 
 > 📦 **All the code is on GitHub:** [github.com/cuppibla/loop-lab-onboarding](https://github.com/cuppibla/loop-lab-onboarding) — you'll clone it in Setup, and every step links to its folder.
@@ -108,7 +112,7 @@ Everything in this lab is one of these four pieces:
 | 1 | **Durable session** | state lives in a DB, not memory | ADK `DatabaseSessionService` (Step 2) |
 | 2 | **Resumable runs** | replay finished steps, re-run the unfinished one | ADK `ResumabilityConfig` (Step 4) |
 | 3 | **Pause / resume** | end the run, continue later on an external event | ADK `LongRunningFunctionTool` (Step 3) |
-| 4 | **The driver + idempotency** | the loop that re-drives runs, safely | **you** (Steps 3–5) — this is the "engineering" |
+| 4 | **The driver + idempotency** | the loop that re-drives runs, safely | **you** (Steps 3–5, 7) — this is the "engineering" |
 
 ADK hands you 1–3. Piece **4 is the part you build** — and it's why this discipline is called
 _loop engineering_: **the loop is the driver.**
@@ -231,6 +235,10 @@ python driver.py Alice
     -> send_welcome({'employee': 'Alice'})
     <agent> ONBOARDING COMPLETE
 ```
+
+> ℹ️ **About the one-line `[EXPERIMENTAL]` warnings:** ADK 2.5 prints a couple of harmless
+> feature-flag notices when it starts (and from Step 4 on, one for `ResumabilityConfig`).
+> They're expected — ignore them. We've trimmed them from every expected output in this lab.
 
 **What just happened:** the Gemini model read its instructions and called the five tools in
 order. Here's the whole agent (`01_baseline/agent.py`), trimmed:
@@ -516,6 +524,14 @@ python driver.py resume Alice
 
 It replays what finished and continues from where it died — no repeated work.
 
+> aside negative
+> **Only re-drive a run that actually *crashed*.** If the run has already reached the clean
+> pause (`stage=AWAITING_APPROVAL`) and you run `resume` anyway, the model re-runs
+> `request_access`, gets a plain result back, and **carries straight on to `grant_access` —
+> no human ever approved.** (We verified this on ADK 2.5.0.) The two resumes have different
+> owners: a **paused** run is woken only by an approval (`function_response`); a **crashed**
+> run is woken by a re-drive. Step 7 turns that sentence into code.
+
 ### The question that makes or breaks everything
 
 You just saw resume **replay completed steps and re-run the unfinished one.** That's exactly
@@ -646,6 +662,141 @@ python driver.py reset && python driver.py start Alice && python driver.py appro
 
 > ‼️ **If you do provision Cloud SQL, tear it down afterward** — it bills while it's running.
 
+## Step 7 · Who presses Continue? (the driver and the sweeper)
+Duration: 12:00
+
+📂 **Code for this step:** [`07_driver/`](https://github.com/cuppibla/loop-lab-onboarding/tree/main/07_driver)
+
+Every step so far ended with **you** typing the next command: `resume Alice`, `approve Alice`.
+That was the honest version of something production can't have: a human at a keyboard playing
+the driver.
+
+Look back at the four-pieces table. Piece #4 said *"the driver — you build it."* Time to
+actually build it.
+
+### First, give the driver a name
+
+👉 `diff 07_driver/agent.py 05_idempotency/agent.py` — only the docstring changed. **The agent
+is finished.** What changes from here is *who calls it*. `drive.py` extracts everything the
+per-step scripts were doing into one function with three entrances:
+
+```python
+async def drive(session_id, *, new_message=None, invocation_id=None):
+    ...
+# 1. new work          drive(sid, new_message=<user text>)
+# 2. doorbell rings    drive(sid, new_message=<function_response>)   # Step 3's resume
+# 3. crash recovery    drive(sid, invocation_id=<unfinished id>)     # Step 4's resume
+```
+
+Nothing here is new — these are exactly the three calls you've been making by hand since
+Step 3. The point of naming the function is what it makes visible: the two resumes don't just
+have different mechanics, **they have different wake-up paths.** A pending approval is woken by
+a *doorbell* — someone sends the `function_response`. A crashed run is woken by… what, exactly?
+
+### The uncomfortable question
+
+In Step 4 you crashed the process and then typed `resume Alice`. But in production:
+
+👉 **The process is dead. Nothing threw an exception. No alert fired. Who even *knows* there's
+an unfinished invocation sitting in the database?**
+
+Nobody. That's the answer. A crash leaves no error — just a session whose last invocation never
+finished, silent on disk. If nothing goes *looking* for it, Alice's onboarding stays frozen
+forever, and the first person to find out is Alice, on Monday, with no laptop.
+
+The missing piece is a **sweeper**: a loop that scans the session store, classifies every
+session, and re-drives only the wrecks. That's `sweeper.py`, and its heart is one decision:
+
+### The discriminator (the load-bearing part)
+
+| The session looks like… | Verdict | The sweeper does |
+|---|---|---|
+| `stage=DONE`, or the turn ended in agent text | **ENDED** | nothing |
+| `stage=AWAITING_APPROVAL` | **PAUSED** | **nothing — that wake-up belongs to the doorbell** |
+| anything else mid-run | **CRASHED** | re-drive the unfinished invocation |
+
+> aside negative
+> **Why the PAUSED row is non-negotiable:** remember the warning from Step 4 — re-driving a
+> *paused* invocation makes the model barrel straight past the approval to `grant_access`
+> (verified on ADK 2.5.0). A sweeper that can't tell *pause* from *crash* doesn't just make
+> noise — **it silently bypasses your human gate.** The discriminator is a security boundary,
+> not a tidiness feature.
+
+Notice what the discriminator reads: the explicit `state["stage"]` enum you built in Step 2.
+(Step 5 taught you not to trust `state` for *side-effect dedup*; for *flow classification* it
+is exactly the source of truth you built it to be.)
+
+### Watch it work — hands off the keyboard
+
+👉💻 **Crash it, then let the sweeper clean up. After the crash, you type no recovery command:**
+```bash
+cd 07_driver
+python drive.py reset
+CRASH_AFTER_ORDER=1 python drive.py start Alice    # orders the laptop, then dies mid-step
+python sweeper.py                                  # pass 1: finds the wreck
+python sweeper.py                                  # pass 2: must refuse the pause
+```
+
+**Expected output (pass 1)** — the sweeper finds the wreck and re-drives it:
+```
+[sweeper] scanning 1 session(s)
+  s-Alice: CRASHED mid-run -> re-driving invocation e-cf1b37f3-…
+    -> request_access({'employee': 'Alice', 'system': 'prod'}) [PAUSE: awaiting human]
+    <agent> The access request for Alice … is pending manager approval. …
+  s-Alice: re-driven -> PAUSED
+```
+
+**Expected output (pass 2)** — and this line is the whole lesson:
+```
+[sweeper] scanning 1 session(s)
+  s-Alice: PAUSED awaiting human (request_access) -> not my job (doorbell)
+```
+
+👉💻 **Ring the doorbell, then sweep once more:**
+```bash
+python drive.py approve Alice
+python sweeper.py
+```
+
+```
+[approve] doorbell rings → function_response request_access(…)
+    -> grant_access({'employee': 'Alice', 'system': 'prod'})
+    -> send_welcome({'employee': 'Alice'})
+    <agent> ONBOARDING COMPLETE
+[status] Alice: stage=DONE  {'accounts': 1, 'laptop_orders': 1, 'access_grants': 1, 'welcomes': 1}
+[sweeper] scanning 1 session(s)
+  s-Alice: ENDED (DONE) -> nothing to do
+```
+
+### What just happened
+
+1. The crash landed **inside** `order_laptop` — the Step 5 window: side effect fired, log entry
+   never written. The sweeper's re-drive re-executed that unfinished step under the hood… and
+   **Step 5's guard answered `already_ordered`.** Check the count: `laptop_orders: 1`. The
+   sweeper is exactly the kind of blind re-driver idempotency exists for — a sweeper without
+   Step 5 is the two-laptops bug *on a schedule*.
+2. The re-driven run parked itself at the approval — and the **second sweep refused to touch
+   it.** The pause belongs to the doorbell.
+3. The approval finished the job; the third sweep found nothing to do.
+
+You never typed a recovery command. **That is a long-running agent actually running.**
+
+> aside positive
+> **The production mapping is one-to-one.** The sweeper is a scheduled job — Cloud Run job +
+> Cloud Scheduler, or Agent Engine's managed equivalent. The doorbell is a webhook endpoint.
+> Same `drive()`, same discriminator, same rules: **what changes is who calls `drive()`, never
+> what `drive()` is.** And note the shape you just built: a **fast path** (doorbells: events,
+> approvals, callbacks) plus a **slow path** (the sweeper, on a clock). The fast path handles
+> the 99%; the slow path is where your *reliability* comes from — it catches everything the
+> fast path drops.
+
+> ℹ️ **Where's the doorbell for machines?** In this lab the doorbell was a human typing
+> `approve`. The other doorbell — an external system calling *you* back (a webhook), fan-outs
+> of several long jobs at once, and the join that collects them — is its own lab, built on this
+> exact `drive()` contract. Watch the series README.
+
+`cd ..`
+
 ## Recap & what's next
 Duration: 3:00
 
@@ -661,12 +812,15 @@ in the cloud unchanged. You built it one idea at a time:
 | 4 | `04_crash_recovery` | survive a crash | `ResumabilityConfig` |
 | 5 | `05_idempotency` | never double-act | **your** guard (idempotency key) |
 | 6 | `06_cloud` | same code, managed | Cloud SQL / Agent Runtime |
+| 7 | `07_driver` | who presses Continue | **your** driver + sweeper |
 
 ### The one thing to remember
 
 A long-running agent is a **durable session** + short **runs** + a **driver** that re-drives
 them safely. ADK gives you the durable pieces; **the driver — and the idempotency that makes it
-safe — is the part you engineer.** That driver is "the loop" in *loop engineering*.
+safe — is the part you engineer.** That driver is "the loop" in *loop engineering*. And every
+wake-up takes one of two paths: a **doorbell** (an event: an approval, a callback) or the
+**sweeper** (a clock). The doorbell is fast; the sweeper is why nothing stays lost.
 
 ### Where to go next
 

@@ -38,6 +38,7 @@ Each level adds exactly one idea. `diff` two neighbours to see the lesson.
 | **[04_crash_recovery](04_crash_recovery)** | survive a crash | `ResumabilityConfig` | `start` → Ctrl-C → `resume` |
 | **[05_idempotency](05_idempotency)** | don't order two laptops | your own guard | crash → `resume` → bug → fix |
 | **[06_cloud](06_cloud)** | same code, managed | Cloud SQL / Agent Runtime | `DB_URL` swap / `adk deploy` |
+| **[07_driver](07_driver)** | who presses Continue | your `drive()` + sweeper | crash → `sweeper.py` ×2 → `approve` |
 
 ```bash
 cd 03_human_approval
@@ -46,28 +47,36 @@ uv run python driver.py start Alice     # pauses at approval; the process exits
 uv run python driver.py approve Alice   # a fresh process resumes and finishes
 ```
 
-## The two "kill the server" moments (why this lab exists)
+## The three "nobody at the keyboard" moments (why this lab exists)
 - **L2 — kill while waiting for a human:** the run already ended cleanly; a fresh process
   resumes from the durable session. Nothing lost.
 - **L4 — crash *inside* a step:** resume re-runs the unfinished step → it orders a **second
   laptop**. The fix is an **idempotency guard**. *A loop that recovers but doesn't guard its
   side effects is just a bug that runs twice.*
+- **Step 7 — crash, and touch nothing:** the **sweeper** finds the wreck and re-drives it —
+  but refuses to touch a run paused for a human (re-driving a paused run **skips the
+  approval**; verified on 2.5.0). Every wake-up is either a **doorbell** (event) or the
+  **sweeper** (clock).
 
 ## How it really works (the 4 pieces)
 | # | What | Who provides it |
 |---|---|---|
 | 1 | Durable session (state in the DB, not memory) | ADK `DatabaseSessionService` → Cloud SQL |
-| 2 | Resumable runs (replay done, re-run unfinished) | ADK `ResumabilityConfig` *(experimental in 2.3)* |
+| 2 | Resumable runs (replay done, re-run unfinished) | ADK `ResumabilityConfig` *(still experimental in 2.5)* |
 | 3 | Pause/resume via function-response | ADK `LongRunningFunctionTool` |
-| 4 | The driver + idempotency (event-driven harness) | **you** (or Agent Runtime) |
+| 4 | The driver + idempotency (event-driven harness) | **you** (or Agent Runtime) — built in [07_driver](07_driver) |
 
-## Notes / gotchas (verified on ADK 2.3.0)
+## Notes / gotchas (verified on ADK 2.5.0)
 - `DatabaseSessionService` uses an **async** engine → `sqlite+aiosqlite://` locally,
   `postgresql+asyncpg://` for Cloud SQL (**not** the sync `pg8000`). Deps: `google-adk[db]`,
   `aiosqlite`, `greenlet`.
 - **Resume after an approval pause:** send a `function_response` (no `invocation_id`).
   **Resume after a crash:** `run_async(invocation_id=<last event>, new_message=None)`.
 - Detect the pause via `event.long_running_tool_ids`.
+- **Never re-drive a run paused for a human** — the model barrels past the approval. The
+  sweeper's discriminator reads `state["stage"]` (see [07_driver/sweeper.py](07_driver/sweeper.py)).
+- A long-running tool's interim `{'status': 'pending'}` result is itself logged as a
+  `function_response` — don't infer "still open" by counting responses.
 
 ## `reference/`
 The Phase-0 proof-of-concept (all mechanics in one place) + `run_poc.sh`. The graded levels
