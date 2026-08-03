@@ -81,3 +81,12 @@ uv run python driver.py approve Alice   # a fresh process resumes and finishes
 ## `reference/`
 The Phase-0 proof-of-concept (all mechanics in one place) + `run_poc.sh`. The graded levels
 above were forward-authored from it.
+
+## Next: the other two doorbells
+
+This lab owns the **crash** wake-up (Step 7's sweeper). Its companion,
+**[The Production Floor](https://github.com/cuppibla/loop-lab-production)**, owns the
+**clean-pause** wake-ups — a machine callback and a human click — and adds fan-out over
+several long jobs at once, a hand-written join, the backstop for silent failures, and a
+typed event stream that lights up a real web UI. Same `drive()` contract, six rungs.
+Steps 2–4 here are its soft prerequisite.

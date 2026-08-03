@@ -793,7 +793,8 @@ You never typed a recovery command. **That is a long-running agent actually runn
 > ℹ️ **Where's the doorbell for machines?** In this lab the doorbell was a human typing
 > `approve`. The other doorbell — an external system calling *you* back (a webhook), fan-outs
 > of several long jobs at once, and the join that collects them — is its own lab, built on this
-> exact `drive()` contract. Watch the series README.
+> exact `drive()` contract: **[The Production Floor](https://github.com/cuppibla/loop-lab-production)**.
+> Same `drive()`, the other two doorbells.
 
 `cd ..`
 
@@ -824,6 +825,11 @@ wake-up takes one of two paths: a **doorbell** (an event: an approval, a callbac
 
 ### Where to go next
 
+- **[The Production Floor](https://github.com/cuppibla/loop-lab-production) — the other two
+  doorbells (the direct sequel):** this lab built the *crash* wake-up (the sweeper). That one
+  builds the *clean-pause* wake-ups — a machine callback and a human click — plus fan-out over
+  several long jobs at once, a hand-written join, and the backstop for the failures nobody rings
+  a bell for. Same `drive()` contract, six rungs, and it lights up a real web UI at the end.
 - **Lab 2 — the self-evolving agent:** an agent that rewrites its own instructions from its own
   eval feedback… and learns to *cheat* the metric. (You optimize what you measure.)
 - **Lab 3 — the agent that dreams:** a support agent that turns yesterday's tickets into

@@ -1,0 +1,631 @@
+
+<!doctype html>
+
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, minimum-scale=1.0, initial-scale=1.0, user-scalable=yes">
+  <meta name="theme-color" content="#4F7DC9">
+  <meta charset="UTF-8">
+  <title>Lab 1: The Long-Running Agent</title>
+  <link rel="stylesheet" href="//fonts.googleapis.com/css?family=Source+Code+Pro:400|Roboto:400,300,400italic,500,700|Roboto+Mono">
+  <link rel="stylesheet" href="//fonts.googleapis.com/icon?family=Material+Icons">
+  <link rel="stylesheet" href="https://storage.googleapis.com/claat-public/codelab-elements.css">
+  <style>
+    .success {
+      color: #1e8e3e;
+    }
+    .error {
+      color: red;
+    }
+  </style>
+</head>
+<body>
+  <google-codelab-analytics gaid="UA-49880327-14" ga4id=""></google-codelab-analytics>
+  <google-codelab codelab-gaid=""
+                  codelab-ga4id=""
+                  id="lab1-long-running-agent"
+                  title="Lab 1: The Long-Running Agent"
+                  environment="web"
+                  feedback-link="https://github.com/cuppibla/loop-lab-onboarding/issues">
+    
+      <google-codelab-step label="Overview" duration="3">
+        <p>It&#39;s Monday, 9:00 a.m. <strong>Alice</strong> is starting her first day. Somewhere, an agent is supposed to create her accounts, order her laptop, get her manager to approve production access, and send her a welcome note.</p>
+<p>Simple, right? You wire up an agent, it calls five tools, done. It even works in your demo.</p>
+<p>Then reality happens. The onboarding takes <strong>two days</strong>, not two seconds — it waits on a manager who&#39;s in meetings until Wednesday. Halfway through, the server it&#39;s running on gets redeployed and <strong>the process dies</strong>. When someone restarts it... Alice now has <strong>two MacBooks</strong> on the way, and her access request has vanished into the void.</p>
+<p>That gap — between the agent that works in a demo and the agent that survives the real world — is what this codelab is about.</p>
+<h2 is-upgraded>What you&#39;ll build</h2>
+<p>You&#39;ll build an <strong>onboarding agent</strong> with Google&#39;s <strong>Agent Development Kit (ADK)</strong> and, step by step, turn it into a proper <strong>long-running agent</strong>. By the end it will:</p>
+<ul>
+<li>✅ <strong>survive a crash</strong> and resume from the exact step it died on,</li>
+<li>✅ <strong>pause for a manager&#39;s approval</strong> — for minutes or days — and continue when it arrives,</li>
+<li>✅ <strong>never order Alice two laptops</strong>, even when a crash makes it re-run a step,</li>
+<li>✅ and <strong>recover with nobody at the keyboard</strong> — a sweeper that finds crashed runs and re-drives them safely.</li>
+</ul>
+<h2 class="checklist" is-upgraded>What you&#39;ll learn</h2>
+<ul class="checklist">
+<li>Why a long-running agent is <strong>not</strong> &#34;a process that stays alive,&#34; and what it is instead.</li>
+<li>How ADK persists an agent so it survives a restart (<code>DatabaseSessionService</code>).</li>
+<li>How to make an agent <strong>pause for a human</strong> and resume later (<code>LongRunningFunctionTool</code>).</li>
+<li>How to <strong>recover from a crash</strong> mid-run (<code>ResumabilityConfig</code>).</li>
+<li><strong>Idempotency</strong> — the one discipline that separates a real long-running agent from a bug that runs twice.</li>
+<li>How to take the exact same code to <strong>Google Cloud</strong> (Cloud SQL + Agent Runtime).</li>
+<li><strong>Who presses &#34;Continue&#34;</strong> — the driver contract, and the sweeper that notices a crash when no human is watching.</li>
+</ul>
+<h2 is-upgraded>Who this is for</h2>
+<p>Anyone who&#39;s built a basic ADK (or any) agent and now wants to run one for real. You should be comfortable in a terminal and know a little Python. No cloud account required for the core lab.</p>
+<p>Each step lives in its own folder (<code>01_baseline</code> → <code>07_driver</code>) and adds <strong>exactly one idea</strong>, so you can always <code>diff</code> two neighbours to see precisely what changed.</p>
+<p>📦 <strong>All the code is on GitHub: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding" target="_blank">github.com/cuppibla/loop-lab-onboarding</a> — you&#39;ll clone it in Setup, and every step links to its folder.</p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="The big idea: how a long-running agent really works" duration="5">
+        <p>Before we touch code, let&#39;s fix the mental model — because almost everyone gets it wrong at first, and once you get it right, the rest of the lab is easy.</p>
+<p class="image-container"><img alt="How a long-running agent works: a durable session that short-lived runs read and write, with a driver that re-drives runs on each event" src="img/f9e106b00f6a25b2.png"></p>
+<h2 is-upgraded>The wrong picture</h2>
+<p>Most people imagine a long-running agent as <strong>a process that stays running</strong> for hours or days, sitting in memory, &#34;thinking,&#34; waiting. Like this:</p>
+<pre><code>[ one Python process, alive for 2 days ]  ← wrong
+  create_account ...... waiting ...... waiting ...... approval! ...... grant_access ...... done
+</code></pre>
+<p>That&#39;s a disaster. A process that lives for two days will be redeployed, OOM-killed, or crash. The moment it dies, everything in memory is gone.</p>
+<h2 is-upgraded>The right picture</h2>
+<p>A long-running agent is <strong>not</strong> a process that stays alive. It&#39;s this:</p>
+<p><strong>A long-running agent = a durable </strong></p>
+<p><strong><em>session</em></strong></p>
+<p><strong> that many short-lived </strong></p>
+<p><strong><em>runs</em></strong></p>
+<p><strong> read and write, plus a </strong></p>
+<p><strong><em>driver</em></strong></p>
+<p><strong> that starts a new run whenever there&#39;s something to do.</strong></p>
+<pre><code>                 (durable session lives in a database, for days)
+  run #1  ─────────────►  pauses / ends, process EXITS  🡒  nothing in memory
+     ...(hours pass; a manager approves)...
+  run #2  ─────────────►  resumes from the DB, finishes
+</code></pre>
+<p>The agent itself is almost <strong>stateless</strong>. All the state lives in the <strong>session</strong> (in a database). The continuity comes from a small piece of code — the <strong>driver</strong> — that fires a fresh run whenever an event says &#34;there&#39;s work to do&#34;: a request comes in, a manager approves, a timer fires, or the server restarts.</p>
+<p><strong>Analogy:</strong> think of a <strong>save-game</strong>. You don&#39;t leave the console on for a week to keep your progress. The game <strong>saves to disk</strong>; you can quit, come back tomorrow, load, and continue exactly where you were. Our agent works the same way — the session is the save file, and the driver is you pressing &#34;Continue.&#34;</p>
+<h2 is-upgraded>The four pieces that make it real</h2>
+<p>Everything in this lab is one of these four pieces:</p>
+<table>
+<tr><td colspan="1" rowspan="1"><p>#</p>
+</td><td colspan="1" rowspan="1"><p>Piece</p>
+</td><td colspan="1" rowspan="1"><p>What it does</p>
+</td><td colspan="1" rowspan="1"><p>Who gives it to you</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>1</p>
+</td><td colspan="1" rowspan="1"><p><strong>Durable session</strong></p>
+</td><td colspan="1" rowspan="1"><p>state lives in a DB, not memory</p>
+</td><td colspan="1" rowspan="1"><p>ADK <code>DatabaseSessionService</code> (Step 2)</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>2</p>
+</td><td colspan="1" rowspan="1"><p><strong>Resumable runs</strong></p>
+</td><td colspan="1" rowspan="1"><p>replay finished steps, re-run the unfinished one</p>
+</td><td colspan="1" rowspan="1"><p>ADK <code>ResumabilityConfig</code> (Step 4)</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>3</p>
+</td><td colspan="1" rowspan="1"><p><strong>Pause / resume</strong></p>
+</td><td colspan="1" rowspan="1"><p>end the run, continue later on an external event</p>
+</td><td colspan="1" rowspan="1"><p>ADK <code>LongRunningFunctionTool</code> (Step 3)</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>4</p>
+</td><td colspan="1" rowspan="1"><p><strong>The driver + idempotency</strong></p>
+</td><td colspan="1" rowspan="1"><p>the loop that re-drives runs, safely</p>
+</td><td colspan="1" rowspan="1"><p><strong>you</strong> (Steps 3–5, 7) — this is the &#34;engineering&#34;</p>
+</td></tr>
+</table>
+<p>ADK hands you 1–3. Piece <strong>4 is the part you build</strong> — and it&#39;s why this discipline is called <em>loop engineering</em>: <strong>the loop is the driver.</strong></p>
+<p>Keep this table in mind. Each step from here just fills in one row.</p>
+<h2 is-upgraded>Walking through Alice&#39;s onboarding, piece by piece</h2>
+<p>Let&#39;s ground this in the actual story from the top of the page, so the four pieces stop being abstract:</p>
+<table>
+<tr><td colspan="1" rowspan="1"><p>Moment in Alice&#39;s onboarding</p>
+</td><td colspan="1" rowspan="1"><p>Piece involved</p>
+</td><td colspan="1" rowspan="1"><p>What&#39;s actually happening</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>Monday 9am: agent creates her account, orders her laptop</p>
+</td><td colspan="1" rowspan="1"><p>Durable session</p>
+</td><td colspan="1" rowspan="1"><p>Each result is written to the DB as it happens — not held in RAM &#34;for later&#34;</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>Manager is in meetings until Wednesday</p>
+</td><td colspan="1" rowspan="1"><p>Pause / resume</p>
+</td><td colspan="1" rowspan="1"><p>The run <strong>ends</strong> the moment <code>request_access</code> returns &#34;pending.&#34; No process is sitting there waiting for two days</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>Wednesday: manager clicks approve</p>
+</td><td colspan="1" rowspan="1"><p>Pause / resume</p>
+</td><td colspan="1" rowspan="1"><p>A brand-new process starts a brand-new run, on the same session, and continues from <code>AWAITING_APPROVAL</code></p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>Server gets redeployed mid-run</p>
+</td><td colspan="1" rowspan="1"><p>Resumable runs</p>
+</td><td colspan="1" rowspan="1"><p>The next run replays everything already logged, then re-runs only the one step that never finished</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>The re-run step happens to be &#34;order the laptop&#34; again</p>
+</td><td colspan="1" rowspan="1"><p>Driver + idempotency</p>
+</td><td colspan="1" rowspan="1"><p>This is the trap. Without a guard, Alice gets two laptops. This is <strong>piece 4</strong>, and it&#39;s the one nothing hands you for free</p>
+</td></tr>
+</table>
+<aside class="special"><p><strong>The single biggest reframe in this lab:</strong> at <strong>no point</strong> is there a process alive for two days. The &#34;long&#34; in &#34;long-running agent&#34; describes the <strong>task</strong> (it takes days), not the <strong>process</strong> (which lives for milliseconds to seconds per run). Every step below is just a mechanism for making a days-long <em>task</em> out of a series of tiny, disposable <em>runs</em>.</p>
+</aside>
+<h2 is-upgraded>Common misconception: &#34;isn&#39;t this just <code>async</code>/<code>await</code>?&#34;</h2>
+<p>If you&#39;ve written async code before, the pause/resume behavior might look like <code>await</code>ing a slow call. It&#39;s a tempting but wrong mental model — and worth killing now, because it&#39;ll bite you every step from here on.</p>
+<table>
+<tr><td colspan="1" rowspan="1"></td><td colspan="1" rowspan="1"><p><code>await some_slow_call()</code></p>
+</td><td colspan="1" rowspan="1"><p>This lab&#39;s pause/resume</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>Where does execution live while waiting?</p>
+</td><td colspan="1" rowspan="1"><p>On the stack, inside the running process</p>
+</td><td colspan="1" rowspan="1"><p>Nowhere — the process has exited</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>What survives if the machine reboots?</p>
+</td><td colspan="1" rowspan="1"><p>Nothing. The <code>await</code> is gone</p>
+</td><td colspan="1" rowspan="1"><p>Everything. It&#39;s a row in a database</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>What resumes it?</p>
+</td><td colspan="1" rowspan="1"><p>The same coroutine, when the awaited call returns</p>
+</td><td colspan="1" rowspan="1"><p>Any process, possibly on a different machine, sending a message</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>How long can it wait?</p>
+</td><td colspan="1" rowspan="1"><p>Seconds, maybe minutes — bounded by the process&#39;s lifetime</p>
+</td><td colspan="1" rowspan="1"><p>Minutes, days, weeks — bounded by nothing</p>
+</td></tr>
+</table>
+<aside class="special"><p><strong>The one-line difference: </strong><code>await</code> suspends a <em>stack frame in memory</em>; what we&#39;re building suspends an <em>entry in a database</em>. That&#39;s why a manager can approve Alice&#39;s access two days later, from any machine, long after the original Python process — and even the original <em>server</em> — no longer exists.</p>
+</aside>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Setup" duration="5">
+        <p>👉💻 <strong>Clone the repo</strong> (you&#39;ll <code>cd</code> into a different folder for each step):</p>
+<pre><code language="language-bash" class="language-bash">git clone https://github.com/cuppibla/loop-lab-onboarding.git
+cd loop-lab-onboarding
+</code></pre>
+<p>👉💻 <strong>Create the environment.</strong> The script picks a Python 3.10+ interpreter, makes a <code>.venv</code>, and installs the pinned dependencies:</p>
+<pre><code language="language-bash" class="language-bash">./setup_venv.sh          # Windows: setup_venv.bat
+source .venv/bin/activate
+</code></pre>
+<p>🧰 <strong>Prefer uv?</strong> Run <code>uv sync</code> instead, and use <code>uv run python ...</code> wherever the codelab says <code>python ...</code>. Everything else is identical.</p>
+<h2 is-upgraded>Get your Gemini API key</h2>
+<p>The agent calls Gemini, so it needs a key. This is free from Google AI Studio and takes about a minute — <strong>no billing and no cloud project required</strong> for the core lab.</p>
+<p>👉 <strong>Get the key:</strong></p>
+<ol type="1">
+<li>Go to <a href="https://aistudio.google.com/apikey" target="_blank"><strong>aistudio.google.com/apikey</strong></a> and sign in with your Google account.</li>
+<li>Click <strong>Create API key</strong> (top-right).</li>
+<li>In the dialog, either pick an existing Google project or let it create a new one for you.</li>
+<li>Copy the key it shows you. It <strong>starts with </strong><strong><code>AIza...</code></strong><strong> and is about 40 characters</strong> long.</li>
+</ol>
+<aside class="warning"><p><strong>Treat the API key like a password.</strong> Don&#39;t paste it into public chats, screenshots, or issues, and never commit it to a public GitHub repo. The <code>.env</code> file below is already in <code>.gitignore</code> so your key stays local — keep it that way.</p>
+</aside>
+<p>👉 <strong>Add the key to your </strong></p>
+<p><strong><code>.env</code></strong></p>
+<p><strong>.</strong> Open the <code>.env</code> file at the repo root and set these two lines (replace <code>AIza...your-key...</code> with the key you just copied):</p>
+<pre><code>GOOGLE_API_KEY=AIza...your-key...
+GOOGLE_GENAI_USE_VERTEXAI=False
+</code></pre>
+<aside class="special"><p><strong>What these two lines mean:</strong></p>
+<ul>
+<li><code>GOOGLE_API_KEY</code> — your AI Studio key; how the agent authenticates to Gemini.</li>
+<li><code>GOOGLE_GENAI_USE_VERTEXAI=False</code> — tells ADK to use the <strong>AI Studio</strong> key directly, <em>not</em> Vertex AI. (We flip this to Vertex only in the very last Cloud step, and only if you choose to.)</li>
+</ul>
+</aside>
+<p>That&#39;s it — no cloud project needed until the very last step.</p>
+<p>ℹ️ <strong>About the &#34;systems&#34;:</strong> to keep the focus on <em>durability</em> (not integrations), every external system — the account service, the laptop store, the access system — is a local stub in <code>fake_systems.py</code> that just writes a row to a JSON file. That&#39;s what lets us <em>count</em> side effects and <em>prove</em> the two-laptops bug later.</p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 1 · Run the baseline (and watch it vanish)" duration="5">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/01_baseline" target="_blank"><code>01_baseline/</code></a></p>
+<p>Let&#39;s meet the agent. It&#39;s an ordinary ADK agent with five tools that run in order.</p>
+<p>👉💻 <strong>Run the baseline onboarding:</strong></p>
+<pre><code language="language-bash" class="language-bash">cd 01_baseline
+python driver.py Alice
+</code></pre>
+<p><strong>Expected output:</strong></p>
+<pre><code>    -&gt; create_account({&#39;employee&#39;: &#39;Alice&#39;})
+    -&gt; order_laptop({&#39;employee&#39;: &#39;Alice&#39;})
+    -&gt; request_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;})
+    -&gt; grant_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;})
+    -&gt; send_welcome({&#39;employee&#39;: &#39;Alice&#39;})
+    &lt;agent&gt; ONBOARDING COMPLETE
+</code></pre>
+<p>ℹ️ <strong>About the one-line </strong></p>
+<p><strong><code>[EXPERIMENTAL]</code></strong></p>
+<p><strong> warnings:</strong> ADK 2.5 prints a couple of harmless feature-flag notices when it starts (and from Step 4 on, one for <code>ResumabilityConfig</code>). They&#39;re expected — ignore them. We&#39;ve trimmed them from every expected output in this lab.</p>
+<p><strong>What just happened:</strong> the Gemini model read its instructions and called the five tools in order. Here&#39;s the whole agent (<code>01_baseline/agent.py</code>), trimmed:</p>
+<pre><code language="language-python" class="language-python">def order_laptop(employee: str) -&gt; dict:
+    return {&#34;status&#34;: &#34;ok&#34;, &#34;order_id&#34;: fake_systems.order_laptop(employee)}
+# ... create_account, request_access, grant_access, send_welcome ...
+
+root_agent = Agent(
+    name=&#34;onboarding&#34;,
+    model=&#34;gemini-3-flash-preview&#34;,
+    instruction=&#34;... do these five steps in order, one tool call at a time ...&#34;,
+    tools=[create_account, order_laptop, request_access, grant_access, send_welcome],
+)
+</code></pre>
+<p>The <code>driver.py</code> here is as simple as it gets: it uses an <strong><code>InMemorySessionService</code></strong>, sends one message, and streams the events.</p>
+<h2 is-upgraded>Why this matters</h2>
+<p>This is the agent 90% of tutorials stop at. It&#39;s fine — <em>until something goes wrong.</em></p>
+<p>👉 <strong>Try to break it:</strong> run it again, and while it&#39;s printing, press <strong>Ctrl-C</strong>.</p>
+<p>There is no <code>onboarding.db</code>. There is no saved progress. <strong>Everything was in RAM, and it&#39;s gone.</strong> If this were Alice&#39;s real onboarding, you&#39;d have no idea which steps finished and which didn&#39;t. Did the laptop get ordered? Nobody knows.</p>
+<p>A real onboarding spans days and <em>will</em> be interrupted. So the very first thing we need is <strong>durability</strong> — piece #1. <code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 2 · Make it survive (persistence)" duration="8">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/02_persistence" target="_blank"><code>02_persistence/</code></a></p>
+<p>The fix for &#34;it&#39;s all in RAM&#34; is to move the state out of RAM and into a <strong>database</strong>. In ADK, that&#39;s the job of a <strong><code>SessionService</code></strong>.</p>
+<p>👉💻 <strong>Run it, then read the result from a </strong></p>
+<p><strong><em>separate</em></strong></p>
+<p><strong> process:</strong></p>
+<pre><code language="language-bash" class="language-bash">cd 02_persistence
+python driver.py reset
+python driver.py start Alice
+python driver.py status Alice      # a brand-new process, reading from disk
+</code></pre>
+<p><strong>Expected output</strong> (note: the <code>status</code> line is printed by a <em>fresh</em> process that ran <em>after</em><code>start</code> finished):</p>
+<pre><code>[status] Alice: stage=DONE  {&#39;accounts&#39;: 1, &#39;laptop_orders&#39;: 1, &#39;access_grants&#39;: 1, &#39;welcomes&#39;: 1}
+</code></pre>
+<h2 is-upgraded>What changed (it&#39;s basically one line)</h2>
+<pre><code language="language-python" class="language-python">from google.adk.sessions import DatabaseSessionService
+session_service = DatabaseSessionService(db_url=&#34;sqlite+aiosqlite:///./onboarding.db&#34;)
+</code></pre>
+<p>That&#39;s the whole idea of a <strong>durable session</strong>. Under the hood, as the agent runs, ADK writes every <strong>event</strong> (each tool call, each tool result, each change to <code>state</code>) into that database. We also gave each step an explicit progress marker:</p>
+<pre><code language="language-python" class="language-python">tool_context.state[&#34;stage&#34;] = &#34;LAPTOP_ORDERED&#34;
+</code></pre>
+<p>💡 <strong>Why an explicit </strong></p>
+<p><strong><code>state["stage"]</code></strong></p>
+<p><strong>?</strong> We <em>could</em> infer progress from the chat history, but a model can hallucinate &#34;I already did that.&#34; A plain, boring state variable is the source of truth the resume logic will rely on later. <strong>State is data, not vibes.</strong></p>
+<p>⚠️ <strong>Gotcha worth knowing: </strong><code>DatabaseSessionService</code> uses an <strong>async</strong> database driver. For SQLite that means the URL is <code>sqlite+aiosqlite://...</code> (not plain <code>sqlite://</code>), and you need the <code>aiosqlite</code> + <code>greenlet</code> packages. We&#39;ve pinned those for you. When we go to Cloud SQL in Step 6, the same rule means <code>postgresql+asyncpg://</code> — <strong>not</strong> the sync <code>pg8000</code>.</p>
+<h2 is-upgraded>What just happened</h2>
+<p>Kill this process any time and the progress is safely on disk in <code>onboarding.db</code>. That&#39;s real progress over Step 1.</p>
+<h2 is-upgraded>But we&#39;re not done</h2>
+<p>👉 Here&#39;s the catch. You can <em>read</em> the saved stage — but there&#39;s still <strong>no way to continue an interrupted run.</strong> The state is a photograph, not a pause button.</p>
+<p><strong>Persisted ≠ resumable.</strong> Saving where you are is necessary but not sufficient; you also need a mechanism to <em>pick up from there</em>. That&#39;s the next two steps.</p>
+<p><code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 3 · Pause for a human (the first &#34;kill the server&#34;)" duration="10">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/03_human_approval" target="_blank"><code>03_human_approval/</code></a></p>
+<p>Some actions you never let an agent do alone. Granting <strong>production access</strong> is one of them — a human manager has to approve it. And that approval might take <strong>days</strong>.</p>
+<p>This is the heart of a long-running agent, so let&#39;s go slowly.</p>
+<h2 is-upgraded>The mechanism: a tool that returns &#34;pending&#34;</h2>
+<p>We turn <code>request_access</code> into a <strong><code>LongRunningFunctionTool</code></strong>:</p>
+<pre><code language="language-python" class="language-python">from google.adk.tools import LongRunningFunctionTool
+
+def request_access(employee: str, system: str, tool_context: ToolContext) -&gt; dict:
+    tool_context.state[&#34;stage&#34;] = &#34;AWAITING_APPROVAL&#34;
+    return {&#34;status&#34;: &#34;pending&#34;, &#34;message&#34;: f&#34;awaiting manager approval for {system}&#34;}
+
+tools=[ ..., LongRunningFunctionTool(request_access), ... ]
+</code></pre>
+<p>Here&#39;s the key behavior, and it&#39;s different from a normal tool: when the agent calls a long-running tool and it returns <strong><code>pending</code></strong>, <strong>the run ends.</strong> The process is free. There&#39;s no thread blocked somewhere &#34;waiting.&#34; All that&#39;s left is a <strong>paused invocation sitting in the durable session</strong> — a note that says &#34;we&#39;re waiting on <code>request_access</code>.&#34;</p>
+<h2 is-upgraded>Wait — doesn&#39;t the run just... hang there?</h2>
+<p>No, and this is the part people trip on. Nothing is &#34;waiting&#34; anywhere. Walk through exactly what happens, in order:</p>
+<ol type="1">
+<li>The agent calls <code>request_access(...)</code>.</li>
+<li>The tool function returns immediately — <code>{"status": "pending", ...}</code>. It does <strong>not</strong> block.</li>
+<li>ADK sees this came from a <code>LongRunningFunctionTool</code> and writes one more fact to the durable session: <em>&#34;there is an unanswered function call, id </em><em><code>xyz</code></em><em>, waiting for a </em><em><code>function_response</code></em><em>.&#34;</em></li>
+<li>The run <strong>ends</strong> — normally, not with an error. <code>driver.py</code> gets control back and the Python process exits.</li>
+</ol>
+<p>At this instant, there is genuinely <strong>nothing running</strong>. Not a thread, not a coroutine, not a process. If you <code>ps aux</code> right now you&#39;ll find nothing related to Alice&#39;s onboarding. The <em>only</em> thing that exists is a row in <code>onboarding.db</code> saying &#34;call <code>xyz</code> is still open.&#34; Everything about &#34;the agent is waiting for the manager&#34; lives entirely in that row — the agent program itself has no idea two days are passing.</p>
+<aside class="special"><p><strong>The mental shift:</strong> a long-running tool doesn&#39;t make the <em>tool</em> run for a long time. It makes the <em>tool call</em> stay open — as a fact in a database — for as long as it takes someone to answer it. The &#34;long-running&#34; part is a gap in the data, not a thread in memory.</p>
+</aside>
+<h2 is-upgraded>See it pause</h2>
+<p>👉💻</p>
+<pre><code language="language-bash" class="language-bash">cd 03_human_approval
+python driver.py reset
+python driver.py start Alice
+</code></pre>
+<p><strong>Expected output</strong> — watch for <code>[PAUSE: awaiting human]</code>, then the process <strong>exits</strong>:</p>
+<pre><code>    -&gt; create_account({&#39;employee&#39;: &#39;Alice&#39;})
+    -&gt; order_laptop({&#39;employee&#39;: &#39;Alice&#39;})
+    -&gt; request_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;}) [PAUSE: awaiting human]
+[status] Alice: stage=AWAITING_APPROVAL  {&#39;accounts&#39;: 1, &#39;laptop_orders&#39;: 1, &#39;access_grants&#39;: 0, ...}
+</code></pre>
+<p>👉 <strong>Now do the dramatic thing:</strong> close this terminal entirely. Kill it. The agent is &#34;mid-onboarding,&#34; waiting on a human — and there is <strong>nothing running.</strong> Nothing is lost, because the pending approval is in the database.</p>
+<h2 is-upgraded>Resume it — from a completely fresh process</h2>
+<p>👉💻 Open a <strong>new</strong> terminal (re-<code>source .venv/bin/activate</code>, <code>cd 03_human_approval</code>) and play the manager:</p>
+<pre><code language="language-bash" class="language-bash">python driver.py approve Alice
+</code></pre>
+<p><strong>Expected output</strong> — a different process picks up exactly where the first one paused:</p>
+<pre><code>[approve] manager approves → resume via function_response request_access(...)
+    -&gt; grant_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;})
+    -&gt; send_welcome({&#39;employee&#39;: &#39;Alice&#39;})
+    &lt;agent&gt; ONBOARDING COMPLETE
+[status] Alice: stage=DONE  ...
+</code></pre>
+<h2 is-upgraded>What just happened (this is the important part)</h2>
+<p><strong>Resuming is just sending the tool&#39;s answer back.</strong> The driver builds a <strong><code>function_response</code></strong> — &#34;here&#39;s the result of that pending <code>request_access</code>: <code>{approved: true}</code>&#34; — and sends it into a new run on the <strong>same session</strong>. ADK matches it to the paused call and continues.</p>
+<pre><code language="language-python" class="language-python">resume = types.Content(role=&#34;user&#34;, parts=[types.Part(
+    function_response=types.FunctionResponse(
+        id=pending_call_id, name=&#34;request_access&#34;, response={&#34;approved&#34;: True}))])
+runner.run_async(session_id=&#34;s-Alice&#34;, new_message=resume)   # a fresh run
+</code></pre>
+<p>💡 <strong>Why this is beautiful:</strong> because &#34;resume&#34; is just a normal message, it works with <strong>any</strong> session backend and <strong>any</strong> amount of elapsed time. Minutes or days later, on a different machine, you send one message and the onboarding continues. We didn&#39;t even need crash-recovery machinery for this — pausing for a human is a <em>clean</em> end-of-run.</p>
+<p>🔒 <strong>The design point:</strong> this is a <strong>locked door</strong>, not a polite sign. The model can <em>ask</em> for access, but it physically cannot grant it — the run ends and only a human&#39;s approval (<code>{approved: true}</code>) reopens it. That&#39;s real control, not a hopeful prompt.</p>
+<p><code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 4 · Survive a crash" duration="10">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/04_crash_recovery" target="_blank"><code>04_crash_recovery/</code></a></p>
+<p>Step 3 handled a <strong>clean</strong> pause — the run ended tidily and we chose when to resume. But a real crash isn&#39;t clean. The process dies <strong>mid-run</strong>, in the middle of executing, with no chance to tidy up. Can we recover from <em>that</em>?</p>
+<h2 is-upgraded>The mechanism: replay the finished steps</h2>
+<p>We add one thing to the <code>App</code>:</p>
+<pre><code language="language-python" class="language-python">from google.adk.apps.app import App, ResumabilityConfig
+app = App(name=&#34;onboarding&#34;, root_agent=root_agent,
+          resumability_config=ResumabilityConfig(is_resumable=True))
+</code></pre>
+<p>With resumability on, ADK treats its <strong>event log</strong> as a journal. Each completed step is an event on disk. When you re-drive a crashed invocation, ADK <strong>replays the completed events</strong> (without re-executing them) and <strong>re-runs only the step that was unfinished</strong>:</p>
+<pre><code>events on disk:   [create_account ✅]  [order_laptop ✅]  [ ??? crash ??? ]
+re-drive        →  replay ✅            replay ✅           RE-RUN this one → continue
+</code></pre>
+<p>ℹ️ <strong>Two different &#34;resumes.&#34;</strong> Step 3&#39;s approval-resume sends a <code>function_response</code> (a clean continuation). This crash-resume is different: you re-drive the <strong>unfinished invocation</strong> by its id, with no new message. Same durable session, two entry points.</p>
+<h2 is-upgraded>What &#34;replay&#34; actually does (and doesn&#39;t do)</h2>
+<p>This is the step where people quietly assume something false: that &#34;replay&#34; means &#34;run the agent again from the top.&#34; It doesn&#39;t. Here&#39;s the distinction that matters:</p>
+<ul>
+<li><strong>Replaying an event</strong> = ADK reads the logged tool <em>call</em> and tool <em>result</em> back into context, exactly as they happened, and does <strong>not</strong> call the tool function again. <code>create_account</code>&#39;s code never executes a second time — ADK just re-tells the model &#34;you already called this, and here&#39;s what it returned.&#34;</li>
+<li><strong>Re-running a step</strong> = the one step whose result was never logged gets executed for real, because as far as the durable session can tell, it never happened.</li>
+</ul>
+<aside class="special"><p><strong>Analogy: a bank statement, not a bank teller.</strong> Replay is like handing the agent its own bank statement for the days it was down — &#34;on Tuesday you did X, on Wednesday you did Y&#34; — so it can pick up Thursday with full context, without re-doing Tuesday and Wednesday. If the statement is missing an entry because the branch closed mid-transaction, that&#39;s the one transaction that has to happen again. That gap is exactly what Step 5 is about.</p>
+</aside>
+<aside class="warning"><p><strong>The dangerous case, in one sentence:</strong> if the crash lands <strong>inside</strong> a step — after the real-world side effect fired but before the log entry was written — replay can&#39;t tell the difference between &#34;never started&#34; and &#34;finished but unlogged,&#34; so it re-runs the step. That&#39;s why the demo crashes <strong>between</strong> steps to show &#34;no repeated work&#34; — and why Step 5 deliberately crashes <em>inside</em> one to expose the two-laptops bug. Keep this in your back pocket.</p>
+</aside>
+<h2 is-upgraded>Try it</h2>
+<p>👉💻</p>
+<pre><code language="language-bash" class="language-bash">cd 04_crash_recovery
+python driver.py reset
+python driver.py start Alice
+</code></pre>
+<p>👉 While it&#39;s printing, mash <strong>Ctrl-C</strong> to kill it between steps. Then bring it back:</p>
+<p>💻</p>
+<pre><code language="language-bash" class="language-bash">python driver.py resume Alice
+</code></pre>
+<p>It replays what finished and continues from where it died — no repeated work.</p>
+<aside class="warning"><p><strong>Only re-drive a run that actually </strong><strong><em>crashed</em></strong><strong>.</strong> If the run has already reached the clean pause (<code>stage=AWAITING_APPROVAL</code>) and you run <code>resume</code> anyway, the model re-runs <code>request_access</code>, gets a plain result back, and <strong>carries straight on to </strong><strong><code>grant_access</code></strong><strong> — no human ever approved.</strong> (We verified this on ADK 2.5.0.) The two resumes have different owners: a <strong>paused</strong> run is woken only by an approval (<code>function_response</code>); a <strong>crashed</strong> run is woken by a re-drive. Step 7 turns that sentence into code.</p>
+</aside>
+<h2 is-upgraded>The question that makes or breaks everything</h2>
+<p>You just saw resume <strong>replay completed steps and re-run the unfinished one.</strong> That&#39;s exactly what you want... until you ask:</p>
+<p>👉 <strong>What if the crash lands </strong></p>
+<p><strong><em>inside</em></strong></p>
+<p><strong> a step that already did something in the real world — like </strong></p>
+<p><strong><em>ordering a laptop</em></strong></p>
+<p><strong> — but before that step was written to the log?</strong></p>
+<p>Then &#34;re-run the unfinished step&#34; means &#34;order the laptop <strong>again</strong>.&#34; Hold that thought — it&#39;s the whole next step. <code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 5 · Don&#39;t order two laptops (idempotency)" duration="12">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/05_idempotency" target="_blank"><code>05_idempotency/</code></a></p>
+<p>This is the most important step in the lab. It&#39;s the difference between an agent that <em>looks</em> crash-safe and one that actually is.</p>
+<h2 is-upgraded>Reproduce the bug</h2>
+<p>Let&#39;s engineer the nasty crash: <code>order_laptop</code> fires its side effect (orders the laptop) and then the process dies <strong>before that step is logged.</strong> On resume, ADK sees <code>order_laptop</code> as unfinished and runs it again.</p>
+<p>👉💻 <strong>Guard OFF, crash right after ordering:</strong></p>
+<pre><code language="language-bash" class="language-bash">cd 05_idempotency
+python driver.py reset
+IDEMPOTENT=0 CRASH_AFTER_ORDER=1 python driver.py start Bob    # orders a laptop, then crashes
+IDEMPOTENT=0 python driver.py resume Bob                       # re-runs order_laptop
+</code></pre>
+<p><strong>Expected output — wince at this:</strong></p>
+<pre><code>[status] Bob: stage=AWAITING_APPROVAL  {&#39;accounts&#39;: 1, &#39;laptop_orders&#39;: 2, ...}   ← TWO laptops
+</code></pre>
+<p>Bob has two MacBooks on the way. In a real system this is a double charge, a duplicate email, a second wire transfer. <strong>Recovery re-ran a side effect.</strong></p>
+<h2 is-upgraded>The fix: check before you act</h2>
+<p>The fix is <strong>idempotency</strong> — making a step safe to run more than once. We guard the side effect with a check:</p>
+<pre><code language="language-python" class="language-python">def order_laptop(employee: str, tool_context: ToolContext) -&gt; dict:
+    if fake_systems.has_laptop_order(employee):     # ← ask FIRST
+        return {&#34;status&#34;: &#34;already_ordered&#34;}         # already done → do nothing
+    order_id = fake_systems.order_laptop(employee)   # the real side effect
+    tool_context.state[&#34;stage&#34;] = &#34;LAPTOP_ORDERED&#34;
+    return {&#34;status&#34;: &#34;ok&#34;, &#34;order_id&#34;: order_id}
+</code></pre>
+<p>👉💻 <strong>Guard ON, same crash:</strong></p>
+<pre><code language="language-bash" class="language-bash">python driver.py reset
+CRASH_AFTER_ORDER=1 python driver.py start Carol
+python driver.py resume Carol
+</code></pre>
+<p><strong>Expected output:</strong></p>
+<pre><code>[status] Carol: stage=AWAITING_APPROVAL  {&#39;accounts&#39;: 1, &#39;laptop_orders&#39;: 1, ...}   ← ONE laptop
+</code></pre>
+<p>Same crash, same resume — but Carol gets exactly one laptop.</p>
+<h2 is-upgraded>Why the guard lives where it does (subtle but important)</h2>
+<p>Notice the guard checks <code>fake_systems</code>, an <strong>independent store</strong> — <em>not </em><code>session.state</code>.</p>
+<p>💡 <strong>Why not </strong></p>
+<p><strong><code>state</code></strong></p>
+<p><strong>?</strong> Because <code>state</code> changes are themselves events in the log, and in our crash window the process died <strong>before</strong> the log was flushed. If the guard relied on <code>state</code>, the guard&#39;s own memory would have been lost in the same crash. The idempotency record has to live somewhere that is written <strong>as part of the side effect itself</strong> — the same place the laptop order is recorded. In production this is an <strong>idempotency key</strong>: a unique id for &#34;this particular action&#34; that the downstream system (the laptop vendor, the payment API) uses to de-duplicate.</p>
+<h2 is-upgraded>The lesson</h2>
+<p><strong>Recovery re-runs steps. So every step with a real-world side effect must be idempotent.</strong></p>
+<p><em>A loop that recovers but doesn&#39;t guard its side effects is just a bug that runs twice.</em></p>
+<p>This is the discipline that separates piece #4 (the part <em>you</em> engineer) from a toy. ADK gave you resumability; <strong>you</strong> made resumability <em>safe</em>. <code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 6 · Take it to Google Cloud" duration="8">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/06_cloud" target="_blank"><code>06_cloud/</code></a></p>
+<p>Here&#39;s the payoff of the whole design: <strong>nothing about your agent changes to go to production.</strong> Only the <em>connection</em> changes.</p>
+<p><strong>&#34;Durability is a connection string, not a rewrite.&#34;</strong></p>
+<h2 is-upgraded>Option A — Cloud SQL for PostgreSQL</h2>
+<p>Your session store was <code>DatabaseSessionService</code>. Point it at a managed Postgres instead of a local file:</p>
+<pre><code language="language-python" class="language-python"># local (Steps 2–5):  sqlite+aiosqlite:///./onboarding.db
+# cloud:              postgresql+asyncpg://...   (via the Cloud SQL Python Connector)
+</code></pre>
+<p>See <a href="https://github.com/cuppibla/loop-lab-onboarding/blob/main/06_cloud/cloudsql_engine.py" target="_blank"><code>06_cloud/cloudsql_engine.py</code></a> for the wiring.</p>
+<p>⚠️ <strong>Remember the async rule from Step 2:</strong> Cloud SQL must use the <strong>async </strong><code>asyncpg</code> driver, not the sync <code>pg8000</code>. This trips people up.</p>
+<h2 is-upgraded>Option B — Agent Runtime (don&#39;t run a database at all)</h2>
+<p><code>adk deploy</code> ships your agent to <strong>Agent Runtime</strong>, which gives you <strong>managed sessions</strong> (there&#39;s no database for you to run or back up), <strong>scale-to-zero</strong> while it waits on that manager, and <strong>Cloud Trace</strong> across every real user. The paused-approval invocation just lives in the managed runtime.</p>
+<p>👉💻 <strong>It still runs locally on SQLite</strong>, so you can finish the lab with no cloud project:</p>
+<pre><code language="language-bash" class="language-bash">cd 06_cloud
+python driver.py reset &amp;&amp; python driver.py start Alice &amp;&amp; python driver.py approve Alice
+</code></pre>
+<p>‼️ <strong>If you do provision Cloud SQL, tear it down afterward</strong> — it bills while it&#39;s running.</p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Step 7 · Who presses Continue? (the driver and the sweeper)" duration="12">
+        <p>📂 <strong>Code for this step: </strong><a href="https://github.com/cuppibla/loop-lab-onboarding/tree/main/07_driver" target="_blank"><code>07_driver/</code></a></p>
+<p>Every step so far ended with <strong>you</strong> typing the next command: <code>resume Alice</code>, <code>approve Alice</code>. That was the honest version of something production can&#39;t have: a human at a keyboard playing the driver.</p>
+<p>Look back at the four-pieces table. Piece #4 said <em>&#34;the driver — you build it.&#34;</em> Time to actually build it.</p>
+<h2 is-upgraded>First, give the driver a name</h2>
+<p>👉 <code>diff 07_driver/agent.py 05_idempotency/agent.py</code> — only the docstring changed. <strong>The agent is finished.</strong> What changes from here is <em>who calls it</em>. <code>drive.py</code> extracts everything the per-step scripts were doing into one function with three entrances:</p>
+<pre><code language="language-python" class="language-python">async def drive(session_id, *, new_message=None, invocation_id=None):
+    ...
+# 1. new work          drive(sid, new_message=&lt;user text&gt;)
+# 2. doorbell rings    drive(sid, new_message=&lt;function_response&gt;)   # Step 3&#39;s resume
+# 3. crash recovery    drive(sid, invocation_id=&lt;unfinished id&gt;)     # Step 4&#39;s resume
+</code></pre>
+<p>Nothing here is new — these are exactly the three calls you&#39;ve been making by hand since Step 3. The point of naming the function is what it makes visible: the two resumes don&#39;t just have different mechanics, <strong>they have different wake-up paths.</strong> A pending approval is woken by a <em>doorbell</em> — someone sends the <code>function_response</code>. A crashed run is woken by... what, exactly?</p>
+<h2 is-upgraded>The uncomfortable question</h2>
+<p>In Step 4 you crashed the process and then typed <code>resume Alice</code>. But in production:</p>
+<p>👉 <strong>The process is dead. Nothing threw an exception. No alert fired. Who even </strong></p>
+<p><strong><em>knows</em></strong></p>
+<p><strong> there&#39;s an unfinished invocation sitting in the database?</strong></p>
+<p>Nobody. That&#39;s the answer. A crash leaves no error — just a session whose last invocation never finished, silent on disk. If nothing goes <em>looking</em> for it, Alice&#39;s onboarding stays frozen forever, and the first person to find out is Alice, on Monday, with no laptop.</p>
+<p>The missing piece is a <strong>sweeper</strong>: a loop that scans the session store, classifies every session, and re-drives only the wrecks. That&#39;s <code>sweeper.py</code>, and its heart is one decision:</p>
+<h2 is-upgraded>The discriminator (the load-bearing part)</h2>
+<table>
+<tr><td colspan="1" rowspan="1"><p>The session looks like...</p>
+</td><td colspan="1" rowspan="1"><p>Verdict</p>
+</td><td colspan="1" rowspan="1"><p>The sweeper does</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p><code>stage=DONE</code>, or the turn ended in agent text</p>
+</td><td colspan="1" rowspan="1"><p><strong>ENDED</strong></p>
+</td><td colspan="1" rowspan="1"><p>nothing</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p><code>stage=AWAITING_APPROVAL</code></p>
+</td><td colspan="1" rowspan="1"><p><strong>PAUSED</strong></p>
+</td><td colspan="1" rowspan="1"><p><strong>nothing — that wake-up belongs to the doorbell</strong></p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>anything else mid-run</p>
+</td><td colspan="1" rowspan="1"><p><strong>CRASHED</strong></p>
+</td><td colspan="1" rowspan="1"><p>re-drive the unfinished invocation</p>
+</td></tr>
+</table>
+<aside class="warning"><p><strong>Why the PAUSED row is non-negotiable:</strong> remember the warning from Step 4 — re-driving a <em>paused</em> invocation makes the model barrel straight past the approval to <code>grant_access</code> (verified on ADK 2.5.0). A sweeper that can&#39;t tell <em>pause</em> from <em>crash</em> doesn&#39;t just make noise — <strong>it silently bypasses your human gate.</strong> The discriminator is a security boundary, not a tidiness feature.</p>
+</aside>
+<p>Notice what the discriminator reads: the explicit <code>state["stage"]</code> enum you built in Step 2. (Step 5 taught you not to trust <code>state</code> for <em>side-effect dedup</em>; for <em>flow classification</em> it is exactly the source of truth you built it to be.)</p>
+<h2 is-upgraded>Watch it work — hands off the keyboard</h2>
+<p>👉💻 <strong>Crash it, then let the sweeper clean up. After the crash, you type no recovery command:</strong></p>
+<pre><code language="language-bash" class="language-bash">cd 07_driver
+python drive.py reset
+CRASH_AFTER_ORDER=1 python drive.py start Alice    # orders the laptop, then dies mid-step
+python sweeper.py                                  # pass 1: finds the wreck
+python sweeper.py                                  # pass 2: must refuse the pause
+</code></pre>
+<p><strong>Expected output (pass 1)</strong> — the sweeper finds the wreck and re-drives it:</p>
+<pre><code>[sweeper] scanning 1 session(s)
+  s-Alice: CRASHED mid-run -&gt; re-driving invocation e-cf1b37f3-...
+    -&gt; request_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;}) [PAUSE: awaiting human]
+    &lt;agent&gt; The access request for Alice ... is pending manager approval. ...
+  s-Alice: re-driven -&gt; PAUSED
+</code></pre>
+<p><strong>Expected output (pass 2)</strong> — and this line is the whole lesson:</p>
+<pre><code>[sweeper] scanning 1 session(s)
+  s-Alice: PAUSED awaiting human (request_access) -&gt; not my job (doorbell)
+</code></pre>
+<p>👉💻 <strong>Ring the doorbell, then sweep once more:</strong></p>
+<pre><code language="language-bash" class="language-bash">python drive.py approve Alice
+python sweeper.py
+</code></pre>
+<pre><code>[approve] doorbell rings → function_response request_access(...)
+    -&gt; grant_access({&#39;employee&#39;: &#39;Alice&#39;, &#39;system&#39;: &#39;prod&#39;})
+    -&gt; send_welcome({&#39;employee&#39;: &#39;Alice&#39;})
+    &lt;agent&gt; ONBOARDING COMPLETE
+[status] Alice: stage=DONE  {&#39;accounts&#39;: 1, &#39;laptop_orders&#39;: 1, &#39;access_grants&#39;: 1, &#39;welcomes&#39;: 1}
+[sweeper] scanning 1 session(s)
+  s-Alice: ENDED (DONE) -&gt; nothing to do
+</code></pre>
+<h2 is-upgraded>What just happened</h2>
+<ol type="1">
+<li>The crash landed <strong>inside </strong><code>order_laptop</code> — the Step 5 window: side effect fired, log entry never written. The sweeper&#39;s re-drive re-executed that unfinished step under the hood... and <strong>Step 5&#39;s guard answered </strong><strong><code>already_ordered</code></strong><strong>.</strong> Check the count: <code>laptop_orders: 1</code>. The sweeper is exactly the kind of blind re-driver idempotency exists for — a sweeper without Step 5 is the two-laptops bug <em>on a schedule</em>.</li>
+<li>The re-driven run parked itself at the approval — and the <strong>second sweep refused to touch it.</strong> The pause belongs to the doorbell.</li>
+<li>The approval finished the job; the third sweep found nothing to do.</li>
+</ol>
+<p>You never typed a recovery command. <strong>That is a long-running agent actually running.</strong></p>
+<aside class="special"><p><strong>The production mapping is one-to-one.</strong> The sweeper is a scheduled job — Cloud Run job + Cloud Scheduler, or Agent Engine&#39;s managed equivalent. The doorbell is a webhook endpoint. Same <code>drive()</code>, same discriminator, same rules: <strong>what changes is who calls </strong><strong><code>drive()</code></strong><strong>, never what </strong><strong><code>drive()</code></strong><strong> is.</strong> And note the shape you just built: a <strong>fast path</strong> (doorbells: events, approvals, callbacks) plus a <strong>slow path</strong> (the sweeper, on a clock). The fast path handles the 99%; the slow path is where your <em>reliability</em> comes from — it catches everything the fast path drops.</p>
+</aside>
+<p>ℹ️ <strong>Where&#39;s the doorbell for machines?</strong> In this lab the doorbell was a human typing <code>approve</code>. The other doorbell — an external system calling <em>you</em> back (a webhook), fan-outs of several long jobs at once, and the join that collects them — is its own lab, built on this exact <code>drive()</code> contract: <a href="https://github.com/cuppibla/loop-lab-production" target="_blank"><strong>The Production Floor</strong></a>. Same <code>drive()</code>, the other two doorbells.</p>
+<p><code>cd ..</code></p>
+
+
+      </google-codelab-step>
+    
+      <google-codelab-step label="Recap &amp; what&#39;s next" duration="3">
+        <p>You started with an agent that lost everything the moment it crashed. You finished with one that survives crashes, waits days for a human, and never double-orders — and the same code runs in the cloud unchanged. You built it one idea at a time:</p>
+<table>
+<tr><td colspan="1" rowspan="1"><p>Step</p>
+</td><td colspan="1" rowspan="1"><p>Folder</p>
+</td><td colspan="1" rowspan="1"><p>Idea</p>
+</td><td colspan="1" rowspan="1"><p>ADK piece</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>1</p>
+</td><td colspan="1" rowspan="1"><p><code>01_baseline</code></p>
+</td><td colspan="1" rowspan="1"><p>it runs (and vanishes)</p>
+</td><td colspan="1" rowspan="1"><p><code>Agent</code> + tools</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>2</p>
+</td><td colspan="1" rowspan="1"><p><code>02_persistence</code></p>
+</td><td colspan="1" rowspan="1"><p>state survives</p>
+</td><td colspan="1" rowspan="1"><p><code>DatabaseSessionService</code></p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>3</p>
+</td><td colspan="1" rowspan="1"><p><code>03_human_approval</code></p>
+</td><td colspan="1" rowspan="1"><p>pause for a human</p>
+</td><td colspan="1" rowspan="1"><p><code>LongRunningFunctionTool</code></p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>4</p>
+</td><td colspan="1" rowspan="1"><p><code>04_crash_recovery</code></p>
+</td><td colspan="1" rowspan="1"><p>survive a crash</p>
+</td><td colspan="1" rowspan="1"><p><code>ResumabilityConfig</code></p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>5</p>
+</td><td colspan="1" rowspan="1"><p><code>05_idempotency</code></p>
+</td><td colspan="1" rowspan="1"><p>never double-act</p>
+</td><td colspan="1" rowspan="1"><p><strong>your</strong> guard (idempotency key)</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>6</p>
+</td><td colspan="1" rowspan="1"><p><code>06_cloud</code></p>
+</td><td colspan="1" rowspan="1"><p>same code, managed</p>
+</td><td colspan="1" rowspan="1"><p>Cloud SQL / Agent Runtime</p>
+</td></tr>
+<tr><td colspan="1" rowspan="1"><p>7</p>
+</td><td colspan="1" rowspan="1"><p><code>07_driver</code></p>
+</td><td colspan="1" rowspan="1"><p>who presses Continue</p>
+</td><td colspan="1" rowspan="1"><p><strong>your</strong> driver + sweeper</p>
+</td></tr>
+</table>
+<h2 is-upgraded>The one thing to remember</h2>
+<p>A long-running agent is a <strong>durable session</strong> + short <strong>runs</strong> + a <strong>driver</strong> that re-drives them safely. ADK gives you the durable pieces; <strong>the driver — and the idempotency that makes it safe — is the part you engineer.</strong> That driver is &#34;the loop&#34; in <em>loop engineering</em>. And every wake-up takes one of two paths: a <strong>doorbell</strong> (an event: an approval, a callback) or the <strong>sweeper</strong> (a clock). The doorbell is fast; the sweeper is why nothing stays lost.</p>
+<h2 is-upgraded>Where to go next</h2>
+<ul>
+<li><a href="https://github.com/cuppibla/loop-lab-production" target="_blank"><strong>The Production Floor</strong></a><strong> — the other two doorbells (the direct sequel):</strong> this lab built the <em>crash</em> wake-up (the sweeper). That one builds the <em>clean-pause</em> wake-ups — a machine callback and a human click — plus fan-out over several long jobs at once, a hand-written join, and the backstop for the failures nobody rings a bell for. Same <code>drive()</code> contract, six rungs, and it lights up a real web UI at the end.</li>
+<li><strong>Lab 2 — the self-evolving agent:</strong> an agent that rewrites its own instructions from its own eval feedback... and learns to <em>cheat</em> the metric. (You optimize what you measure.)</li>
+<li><strong>Lab 3 — the agent that dreams:</strong> a support agent that turns yesterday&#39;s tickets into reusable lessons via a nightly background &#34;dream,&#34; so it stops repeating the same mistake.</li>
+</ul>
+<h2 is-upgraded>Resources</h2>
+<ul>
+<li>ADK docs: <a href="https://adk.dev" target="_blank">adk.dev</a></li>
+<li>This repo: <a href="https://github.com/cuppibla/loop-lab-onboarding" target="_blank">github.com/cuppibla/loop-lab-onboarding</a></li>
+<li>Get a Gemini API key: <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a></li>
+</ul>
+
+
+      </google-codelab-step>
+    
+  </google-codelab>
+
+  <script src="https://storage.googleapis.com/claat-public/native-shim.js"></script>
+  <script src="https://storage.googleapis.com/claat-public/custom-elements.min.js"></script>
+  <script src="https://storage.googleapis.com/claat-public/prettify.js"></script>
+  <script src="https://storage.googleapis.com/claat-public/codelab-elements.js"></script>
+  <script src="//support.google.com/inapp/api.js"></script>
+
+</body>
+</html>

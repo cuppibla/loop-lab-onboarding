@@ -1,0 +1,27 @@
+{
+  "environment": "web",
+  "format": "html",
+  "prefix": "https://storage.googleapis.com",
+  "mainga": "UA-49880327-14",
+  "updated": "2026-08-03T10:40:10-07:00",
+  "id": "lab1-long-running-agent",
+  "duration": 81,
+  "title": "Lab 1: The Long-Running Agent",
+  "summary": "Build a long-running AI agent with Google’s ADK — one that survives crashes, pauses for a human, never double-acts, and recovers with nobody at the keyboard. You’ll go from a toy that loses everything when it crashes to a durable, resumable, human-in-the-loop agent, one idea at a time.",
+  "source": "CODELAB.md",
+  "theme": "",
+  "status": [
+    "draft"
+  ],
+  "category": [
+    "ai",
+    "adk",
+    "agents",
+    "gemini"
+  ],
+  "tags": [
+    "web"
+  ],
+  "feedback": "https://github.com/cuppibla/loop-lab-onboarding/issues",
+  "url": "lab1-long-running-agent"
+}
