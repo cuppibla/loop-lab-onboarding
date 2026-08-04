@@ -1,5 +1,10 @@
 # Lab 1 · The Long-Running Agent
 
+> **🌅 Want the full course?** This lab and its sequel are merged into
+> **[Overnight Studios](https://github.com/cuppibla/overnight-studios)** — the
+> comprehensive long-running-agent lab (nine rungs, one axis, Colab included).
+> This repo remains the standalone durability climb.
+
 A hands-on ADK codelab: how to make an agent that **survives time** — it spans a long
 process, pauses for a human, survives crashes, and never double-acts. Built as a graded
 ladder you run in your terminal, one idea per level.
